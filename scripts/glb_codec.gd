@@ -14,7 +14,8 @@ extends RefCounted
 
 
 
-const MAX_GLB_BYTES := 96 * 1024 * 1024
+# Shared per-file ceiling for imported models and animation GLBs.
+const MAX_GLB_BYTES := 150 * 1024 * 1024
 
 
 const LARGE_MODEL_BYTES := 40 * 1024 * 1024
@@ -101,11 +102,13 @@ static func prepare(path: String) -> Dictionary:
 
 
 
-static func validate(bytes: PackedByteArray, allow_animation_only: bool = false) -> Dictionary:
+# Imported models use the default limit. A packaged scene has a separately
+# bounded limit supplied by DraftStore; its GLB is still checked identically.
+static func validate(bytes: PackedByteArray, allow_animation_only: bool = false, max_bytes: int = MAX_GLB_BYTES) -> Dictionary:
 	if bytes.size() < 28: return { "ok": false, "error": "The file is too small to be a GLB.", "hint": "Download it again; the copy looks truncated."}
-	if bytes.size() > MAX_GLB_BYTES:
+	if bytes.size() > max_bytes:
 		return { "ok": false,
-			"error": "This model is %.1f MB; the limit is %.0f MB per model." % [float(bytes.size()) / 1048576.0, float(MAX_GLB_BYTES) / 1048576.0],
+			"error": "This GLB is %.1f MiB; the limit is %.0f MiB." % [float(bytes.size()) / 1048576.0, float(max_bytes) / 1048576.0],
 			"hint": "Re-export it with 2K instead of 4K textures, or split it into parts and place them together."}
 	if bytes.slice(0, 4).get_string_from_ascii() != "glTF":
 		return { "ok": false, "error": "The file does not start with the glTF header.", "hint": "It may be a .gltf text file, a zip, or a renamed FBX."}

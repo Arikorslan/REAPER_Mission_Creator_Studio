@@ -7,6 +7,7 @@ const Terrain = preload("res://scripts/terrain_model.gd")
 const Routes = preload("res://scripts/route_check.gd")
 const Weather = preload("res://scripts/environment.gd")
 const Store = preload("res://scripts/draft_store.gd")
+const Codec = preload("res://scripts/glb_codec.gd")
 
 const OVERLAP_METRES := 1.5
 const BURIED_HEIGHT := -0.5
@@ -134,8 +135,9 @@ static func build(state, version: String = "") -> Dictionary:
 		assets += 1
 		bytes += (state.custom_assets[key].get("bytes", PackedByteArray()) as PackedByteArray).size()
 	lines.append("IMPORTED ASSETS")
-	lines.append("  %d of 24 slots • %.1f of %.0f MiB • largest model allowed 40 MiB" % [
-		assets, float(bytes) / 1048576.0, float(Store.MAX_FILE - Store.MAX_META - 12) / 1048576.0])
+	lines.append("  %d of 24 slots • %.1f of %.0f MiB • imported model limit %.0f MiB" % [
+		assets, float(bytes) / 1048576.0, float(Store.MAX_FILE - Store.MAX_META - 12) / 1048576.0, float(Codec.MAX_GLB_BYTES) / 1048576.0])
+	lines.append("  exported scene limit %.0f MiB; large scenes need substantial device memory" % (float(Store.MAX_SCENE_BYTES) / 1048576.0))
 	if assets >= 20:
 		problems.append("Only %d asset slot(s) left." % (24 - assets))
 	lines.append("")

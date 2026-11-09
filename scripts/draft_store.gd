@@ -3,6 +3,7 @@ extends RefCounted
 
 
 const Codec = preload("res://scripts/glb_codec.gd")
+const SceneCheck = preload("res://scripts/glb_scene_check.gd")
 const Platform = preload("res://scripts/platform_files.gd")
 const Library = preload("res://scripts/asset_library.gd")
 const TextureCodec = preload("res://scripts/texture_codec.gd")
@@ -20,9 +21,12 @@ const PAINT_MISSION_MAGIC := "RMISSN03"
 
 const SCENE_MISSION_MAGIC := "RMISSN04"
 const SCENE_PREFIX := "scn_"
-const MAX_SCENE_BYTES := 96 * 1024 * 1024
+# Exported mission scenes have their own budget, separate from the 150 MiB
+# imported model/animation limit. The v5 game reader permits 512 MiB per asset.
+const MAX_SCENE_BYTES := 512 * 1024 * 1024
 const SCENE_FORMAT := "reaper.scene/2"
-const MAX_FILE := 200 * 1024 * 1024
+# A package can contain the exported scene plus original source assets.
+const MAX_FILE := 1024 * 1024 * 1024
 const MAX_META := 4 * 1024 * 1024
 const MAX_OBJECTS := 200
 const MAX_ASSETS := 24
@@ -65,7 +69,7 @@ static func check_document(data: Variant, assets: Variant) -> Dictionary:
 			scene_records += 1
 			if scene_records > 1: return { "ok": false, "error": "Only one exported scene can travel with a mission."}
 			if not str(key).begins_with(SCENE_PREFIX) or b.size() < 20 or b.size() > MAX_SCENE_BYTES: return { "ok": false, "error": "Invalid embedded scene."}
-			var scene_check: Dictionary = Codec.validate(b, false)
+			var scene_check: Dictionary = Codec.validate(b, false, MAX_SCENE_BYTES)
 			if not scene_check.ok: return { "ok": false, "error": "The embedded scene is not a readable GLB: " + str(scene_check.error)}
 			asset_bytes += b.size()
 			continue
@@ -156,20 +160,24 @@ static func needs_paint_format(data: Dictionary, assets: Dictionary) -> bool:
 		if item is Dictionary and str(item.get("category", "model")) == "texture" and item.get("bytes", PackedByteArray()).size() > 8 * 1024 * 1024: return true
 	return false
 
-static func save_draft(path: String, data: Dictionary, assets: Dictionary, signature: String = MAGIC) -> Dictionary:
+static func save_draft(path: String, data: Dictionary, assets: Dictionary, signature: String = MAGIC, progress: Callable = Callable()) -> Dictionary:
 	if signature not in [MAGIC, PAINT_MAGIC, MISSION_MAGIC, PAINT_MISSION_MAGIC, SCENE_MISSION_MAGIC]: return { "ok": false, "error": "Unsupported file signature."}
 	var mission_export := signature in [MISSION_MAGIC, PAINT_MISSION_MAGIC, SCENE_MISSION_MAGIC]
 	if signature == SCENE_MISSION_MAGIC:
 		signature = SCENE_MISSION_MAGIC
 	elif needs_paint_format(data, assets):
 		signature = PAINT_MISSION_MAGIC if mission_export else PAINT_MAGIC
+	if progress.is_valid(): progress.call("prepare", 0, 0)
 	var valid := check_document(data, assets)
 	if not valid.ok: return valid
 	if path.is_empty(): return { "ok": false, "error": "No destination selected."}
 	var records: Array = []; var keys := assets.keys(); keys.sort()
+	var hashed := 0
 	for id in keys:
 		var b: PackedByteArray = assets[id].bytes
 		records.append({ "id": id, "name": assets[id].name, "category": str(assets[id].get("category", "model")), "length": b.size(), "sha256": Codec.sha256(b)})
+		hashed += 1
+		if progress.is_valid(): progress.call("hash", hashed, keys.size())
 	var manifest: Dictionary = { "schema": 1, "kind": "REAPER_MISSION_CREATOR_DRAFT_CONTAINER", "mission": data, "assets": records}
 	if mission_export:
 		manifest["format"] = "reaper.mission/%d" % ([4, 3, 2][[SCENE_MISSION_MAGIC, PAINT_MISSION_MAGIC, MISSION_MAGIC].find(signature)])
@@ -178,10 +186,14 @@ static func save_draft(path: String, data: Dictionary, assets: Dictionary, signa
 		if data.has("scene"): manifest["scene_format"] = SCENE_FORMAT
 	var json := JSON.stringify(manifest, "", true, true).to_utf8_buffer()
 	if json.size() > MAX_META: return { "ok": false, "error": "Draft metadata is too large."}
-	var payload := PackedByteArray()
-	payload.append_array(signature.to_ascii_buffer()); payload.append_array(_bytes_u32(json.size())); payload.append_array(json)
-	for id in keys: payload.append_array(assets[id].bytes)
-	var written := Platform.write_document(path, payload)
+	# Avoid assembling a second package-sized buffer. The GLB/asset bytes already
+	# exist in memory; write them sequentially into the safe destination instead.
+	var parts: Array = [signature.to_ascii_buffer(), _bytes_u32(json.size()), json]
+	for id in keys: parts.append(assets[id].bytes)
+	var write_progress := Callable()
+	if progress.is_valid():
+		write_progress = func (done: int, total: int) -> void: progress.call("write", done, total)
+	var written := Platform.write_document_parts(path, parts, write_progress)
 	if not written.ok: return { "ok": false, "error": str(written.error), "recovery": str(written.get("recovery", ""))}
 	return { "ok": true, "error": "", "path": path, "recovery": ""}
 
@@ -240,9 +252,11 @@ static func load_mission(path: String) -> Dictionary:
 
 
 static func save_mission_package(path: String, data: Dictionary, assets: Dictionary,
-		scene_glb: PackedByteArray, scene_block: Dictionary) -> Dictionary:
+		scene_glb: PackedByteArray, scene_block: Dictionary, fast_verify: bool = false,
+		progress: Callable = Callable()) -> Dictionary:
 	if str(data.get("recon_target", "")).is_empty():
 		return { "ok": false, "error": "Select a placed object and use SET RECON TARGET before exporting a playable mission."}
+	if progress.is_valid(): progress.call("prepare", 0, 0)
 	var packed_data: Dictionary = data.duplicate(true)
 	var packed_assets: Dictionary = {}
 	for key in assets:
@@ -251,7 +265,7 @@ static func save_mission_package(path: String, data: Dictionary, assets: Diction
 	var info: Dictionary = {}
 	if scene_glb.size() >= 20:
 		if scene_glb.size() > MAX_SCENE_BYTES:
-			return { "ok": false, "error": "The exported scene is %.1f MB; the package limit is %d MB." % [
+			return { "ok": false, "error": "The exported scene is %.1f MiB; the scene limit is %d MiB." % [
 				float(scene_glb.size()) / 1048576.0, int(MAX_SCENE_BYTES / 1048576)]}
 		var sha := Codec.sha256(scene_glb)
 		var record_id := SCENE_PREFIX + sha
@@ -262,9 +276,10 @@ static func save_mission_package(path: String, data: Dictionary, assets: Diction
 		packed_data["scene"] = block
 	else:
 		return { "ok": false, "error": "The scene could not be exported, so the mission package was not written."}
-	var written := save_draft(path, packed_data, packed_assets, SCENE_MISSION_MAGIC)
+	var written := save_draft(path, packed_data, packed_assets, SCENE_MISSION_MAGIC, progress)
 	if not bool(written.get("ok", false)): return written
-	var verified := verify_package(path)
+	if progress.is_valid(): progress.call("verify", 0, 0)
+	var verified := verify_package(path, fast_verify)
 	if not bool(verified.get("ok", false)):
 		return { "ok": false, "error": "The mission file was written but its own check failed: " + str(verified.get("error", "")), "path": path}
 	return { "ok": true, "error": "", "path": path, "fidelity": verified,
@@ -273,7 +288,7 @@ static func save_mission_package(path: String, data: Dictionary, assets: Diction
 
 
 
-static func verify_package(path: String) -> Dictionary:
+static func verify_package(path: String, fast_verify: bool = false) -> Dictionary:
 	var loaded := load_draft(path, SCENE_MISSION_MAGIC)
 	if not bool(loaded.get("ok", false)): return loaded
 	var mission: Dictionary = loaded.mission
@@ -293,22 +308,34 @@ static func verify_package(path: String) -> Dictionary:
 	var source_heights: Array = mission.get("terrain", {}).get("heights", [])
 	if source_heights.size() != heights.size(): return { "ok": false, "error": "The scene block terrain differs from the mission terrain."}
 	var nodes: Array = block.get("nodes", [])
-	var doc := GLTFDocument.new(); var gs := GLTFState.new()
-	if doc.append_from_buffer(glb_bytes, "", gs) != OK: return { "ok": false, "error": "The embedded scene is not readable."}
-	var scene_root: Node3D = doc.generate_scene(gs, 30.0, false, false)
-	if scene_root == null: return { "ok": false, "error": "The embedded scene produced no scene."}
-	var worst := 0.0; var worst_name := ""; var missing: Array = []
-	for row in nodes:
-		var wanted := Vector3(float(row.position[0]), float(row.position[1]), float(row.position[2]))
-		var found: Node3D = null
-		for candidate in scene_root.find_children("*", "Node3D", true, false):
-			if str((candidate as Node3D).name) == str(row.name): found = candidate; break
-		if found == null: missing.append(str(row.name)); continue
-		var d := (wanted - found.position).length()
-		if d > worst: worst = d; worst_name = str(row.name)
-	scene_root.free()
-	if not missing.is_empty(): return { "ok": false, "error": "The embedded scene is missing %d object(s)." % missing.size()}
-	if worst > 0.001: return { "ok": false, "error": "An object moved when the package was re-read (%s by %.3f m)." % [worst_name, worst]}
+	var worst := 0.0
+	if fast_verify:
+		# The freshly serialized GLB was already checked for node placement. A
+		# CPU-only structural recheck plus the re-read SHA-256 allows this stage
+		# to run off the GUI thread without instantiating GPU-backed nodes.
+		var checked: Dictionary = SceneCheck.verify(glb_bytes, nodes)
+		if not bool(checked.get("ok", false)): return checked
+		worst = float(checked.get("worst_placement_m", 0.0))
+	else:
+		var doc := GLTFDocument.new(); var gs := GLTFState.new()
+		# Images remain in the package and are SHA-256 checked above. Avoid decoding
+		# all textures again just to verify terrain geometry and object placement.
+		gs.handle_binary_image_mode = GLTFState.HANDLE_BINARY_IMAGE_MODE_DISCARD_TEXTURES
+		if doc.append_from_buffer(glb_bytes, "", gs) != OK: return { "ok": false, "error": "The embedded scene is not readable."}
+		var scene_root: Node3D = doc.generate_scene(gs, 30.0, false, false)
+		if scene_root == null: return { "ok": false, "error": "The embedded scene produced no scene."}
+		var worst_name := ""; var missing: Array = []
+		for row in nodes:
+			var wanted := Vector3(float(row.position[0]), float(row.position[1]), float(row.position[2]))
+			var found: Node3D = null
+			for candidate in scene_root.find_children("*", "Node3D", true, false):
+				if str((candidate as Node3D).name) == str(row.name): found = candidate; break
+			if found == null: missing.append(str(row.name)); continue
+			var d := (wanted - found.position).length()
+			if d > worst: worst = d; worst_name = str(row.name)
+		scene_root.free()
+		if not missing.is_empty(): return { "ok": false, "error": "The embedded scene is missing %d object(s)." % missing.size()}
+		if worst > 0.001: return { "ok": false, "error": "An object moved when the package was re-read (%s by %.3f m)." % [worst_name, worst]}
 	var missing_keys: Array = []
 	for key in ["terrain", "objects", "name", "recon_target"]:
 		if not mission.has(key): missing_keys.append(key)

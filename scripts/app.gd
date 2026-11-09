@@ -5,6 +5,8 @@ const Store = preload("res://scripts/draft_store.gd")
 const Library = preload("res://scripts/asset_library.gd")
 const Codec = preload("res://scripts/glb_codec.gd")
 const Exporter = preload("res://scripts/scene_export.gd")
+const ExportTasks = preload("res://scripts/export_tasks.gd")
+const ExportProgress = preload("res://scripts/export_progress.gd")
 const MapCanvas = preload("res://scripts/map_canvas.gd")
 const SceneView = preload("res://scripts/scene_view.gd")
 const SceneInteraction = preload("res://scripts/scene_interaction.gd")
@@ -231,13 +233,15 @@ func _ready() -> void:
 	touch_ui = android or DisplayServer.is_touchscreen_available()
 	folders = Folders.new(); folders.load_state()
 	get_tree().auto_accept_quit = false
+	# Back must be handled by _notification(), including while exporting.
+	get_tree().quit_on_go_back = false
 	if DisplayServer.get_name() != "headless" and not android: DisplayServer.window_set_min_size(Vector2i(640, 520))
 	state.reset_blank()
 	_seed_default_ground()
 	history = History.new(); selection = Selection.new(); validator = Validation.new()
 	library_index = LibraryIndex.new(); library_index.load_state()
 	perf = Perf.new(); autosave = Autosave.new()
-	_build_theme(); _build_ui(); _make_dialogs(); _make_extra_dialogs(); _build_help_overlay()
+	_build_theme(); _build_ui(); _make_dialogs(); _make_extra_dialogs(); _build_help_overlay(); _make_export_progress_overlay()
 	if android: _apply_android_dialog_defaults()
 	_apply_dialog_titles()
 	state.changed.connect(_state_changed)
@@ -898,7 +902,7 @@ func _build_folder_panel(parent: VBoxContainer) -> void:
 	var create := _button("CREATE"); create.pressed.connect(_create_folder_from_edit); row.add_child(create)
 	folder_list = VBoxContainer.new(); folder_list.add_theme_constant_override("separation", 4); parent.add_child(folder_list)
 	save_here_button = _button("SAVE DRAFT IN FOLDER", true); save_here_button.tooltip_text = "Save the editable draft straight into the highlighted folder."; save_here_button.pressed.connect(_save_in_folder); parent.add_child(save_here_button)
-	export_here_button = _button("EXPORT .RMISSION IN FOLDER"); export_here_button.tooltip_text = "Write the data-only recon mission into the highlighted folder."; export_here_button.pressed.connect(_export_in_folder); parent.add_child(export_here_button)
+	export_here_button = _button("EXPORT .RMISSION IN FOLDER"); export_here_button.tooltip_text = "Write the complete mission package into the highlighted folder."; export_here_button.pressed.connect(_export_in_folder); parent.add_child(export_here_button)
 	var pack_row := VBoxContainer.new(); pack_row.add_theme_constant_override("separation", 6); parent.add_child(pack_row)
 	export3d_button = _button("EXPORT 3D PACK"); export3d_button.tooltip_text = "Write a zip holding one scene.glb of the whole scene, a ready Godot 4 project, a Unity loader, and the object manifest in CSV and JSON. Keep the .rmission for the game itself."; export3d_button.pressed.connect(func (): _export_pack_requested()); export3d_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL; pack_row.add_child(export3d_button)
 	exportglb_button = _button("EXPORT .GLB"); exportglb_button.tooltip_text = "Write just the whole scene as one binary glTF file for Blender, Godot, Unity (glTFast) or Unreal."; exportglb_button.pressed.connect(func (): _export_glb_requested()); exportglb_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL; pack_row.add_child(exportglb_button)
@@ -1027,7 +1031,7 @@ func _apply_dialog_titles() -> void:
 		convert_dialog: "Select a trusted FBX to convert",
 		convert_save_dialog: "Save converted GLB",
 		save_dialog: "Save editor draft (not game playable)",
-		export_dialog: "Export data-only custom recon mission",
+		export_dialog: "Export custom mission package",
 		glb_dialog: "Export the scene as one GLB",
 		pack_dialog: "Export a 3D pack (Godot + Unity + manifest)",
 		open_dialog: "Open mission creator draft",
@@ -1048,7 +1052,7 @@ func _make_dialogs() -> void:
 	convert_dialog = FileDialog.new(); convert_dialog.title = "Select a trusted FBX to convert"; convert_dialog.access = FileDialog.ACCESS_FILESYSTEM; convert_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE; convert_dialog.add_filter("*.fbx,*.fbx.png", "FBX file"); add_child(convert_dialog); convert_dialog.file_selected.connect(_convert_fbx)
 	convert_save_dialog = FileDialog.new(); convert_save_dialog.title = "Save converted GLB"; convert_save_dialog.access = FileDialog.ACCESS_FILESYSTEM; convert_save_dialog.file_mode = FileDialog.FILE_MODE_SAVE_FILE; convert_save_dialog.add_filter("*.glb", "GLB model or animation"); add_child(convert_save_dialog); convert_save_dialog.file_selected.connect(_save_converted_glb)
 	save_dialog = FileDialog.new(); save_dialog.title = "Save editor draft (not game playable)"; save_dialog.access = FileDialog.ACCESS_FILESYSTEM; save_dialog.file_mode = FileDialog.FILE_MODE_SAVE_FILE; save_dialog.add_filter("*.rmdraft", "Mission creator draft"); save_dialog.current_file = "Untitled_Mission.rmdraft"; add_child(save_dialog); save_dialog.file_selected.connect(_save_to)
-	export_dialog = FileDialog.new(); export_dialog.title = "Export data-only custom recon mission"; export_dialog.access = FileDialog.ACCESS_FILESYSTEM; export_dialog.file_mode = FileDialog.FILE_MODE_SAVE_FILE; export_dialog.add_filter("*.rmission", "REAPER custom mission"); export_dialog.current_file = "Custom_Mission.rmission"; add_child(export_dialog); export_dialog.file_selected.connect(_export_mission_to)
+	export_dialog = FileDialog.new(); export_dialog.title = "Export custom mission package"; export_dialog.access = FileDialog.ACCESS_FILESYSTEM; export_dialog.file_mode = FileDialog.FILE_MODE_SAVE_FILE; export_dialog.add_filter("*.rmission", "REAPER custom mission"); export_dialog.current_file = "Custom_Mission.rmission"; add_child(export_dialog); export_dialog.file_selected.connect(_export_mission_to)
 	glb_dialog = FileDialog.new(); glb_dialog.title = "Export the scene as one GLB"; glb_dialog.access = FileDialog.ACCESS_FILESYSTEM; glb_dialog.file_mode = FileDialog.FILE_MODE_SAVE_FILE; glb_dialog.add_filter("*.glb", "Binary glTF scene"); glb_dialog.current_file = "REAPER_Scene.glb"; add_child(glb_dialog); glb_dialog.file_selected.connect(_export_glb_to)
 	pack_dialog = FileDialog.new(); pack_dialog.title = "Export a 3D pack (Godot + Unity + manifest)"; pack_dialog.access = FileDialog.ACCESS_FILESYSTEM; pack_dialog.file_mode = FileDialog.FILE_MODE_SAVE_FILE; pack_dialog.add_filter("*.zip", "3D export archive"); pack_dialog.current_file = "REAPER_3D_Export.zip"; add_child(pack_dialog); pack_dialog.file_selected.connect(_export_pack_to)
 	open_dialog = FileDialog.new(); open_dialog.title = "Open mission creator draft"; open_dialog.access = FileDialog.ACCESS_FILESYSTEM; open_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE; open_dialog.add_filter("*.rmdraft", "Mission creator draft"); add_child(open_dialog); open_dialog.file_selected.connect(_open_from)
@@ -1502,6 +1506,7 @@ func _toggle_map_visibility() -> void:
 		map_visibility_button.set_pressed_no_signal(map_view.visible)
 	_status("Editable map shown." if map_view.visible else "Editable map hidden; use SHOW MAP to restore it.")
 func _files_dropped(paths: PackedStringArray) -> void:
+	if _export_running: return
 	for path in paths:
 		var lower := path.to_lower()
 		if lower.ends_with(".glb") or lower.ends_with(".glb.png") or lower.ends_with(".fbx") or lower.ends_with(".fbx.png") or lower.ends_with(".gltf") or lower.ends_with(".gltf.png") or lower.ends_with(".zip"): _import_model(path)
@@ -1586,40 +1591,10 @@ func _export_glb_requested() -> void:
 	glb_dialog.popup_centered_ratio(0.7)
 
 func _export_pack_to(path: String) -> void:
-	if _export_running: _export_busy_message(); return
-	state.finish_paint_stroke(); state.commit_paint()
-	path = Platform.ensure_extension(path, "zip")
-	if _report_oversized(): return
-	_set_export_controls(false)
-	_status("Building the 3D export; a big scene takes a few seconds...")
-	await get_tree().process_frame
-	var built: Dictionary = await Exporter.build_pack_stepped(state, library, _export_progress_tick)
-	if not bool(built.ok):
-		_set_export_controls(true); _message(_explain(built)); return
-	_status("Writing the 3D package...")
-	await get_tree().process_frame
-	var write := Platform.write_document(path, built.bytes)
-	_set_export_controls(true)
-	if not bool(write.get("ok", false)): _message("Could not write the export: " + str(write.get("error", "unknown error"))); return
-	_status("3D pack exported: " + Platform.display_label(path) +" • %d objects • " + Platform.display_location(path))
+	await _export_with_progress("pack", Platform.ensure_extension(path, "zip"))
 
 func _export_glb_to(path: String) -> void:
-	if _export_running: _export_busy_message(); return
-	state.finish_paint_stroke(); state.commit_paint()
-	path = Platform.ensure_extension(path, "glb")
-	if _report_oversized(): return
-	_set_export_controls(false)
-	_status("Building the scene .glb...")
-	await get_tree().process_frame
-	var built: Dictionary = await Exporter.build_combined_stepped(state, library, _export_progress_tick)
-	if not bool(built.get("ok", false)):
-		_set_export_controls(true); _message(_explain(built)); return
-	_status("Writing the .glb...")
-	await get_tree().process_frame
-	var write := Platform.write_document(path, built.get("bytes", PackedByteArray()))
-	_set_export_controls(true)
-	if not bool(write.get("ok", false)): _message("Could not write the GLB: " + str(write.get("error", "unknown error"))); return
-	_status("Scene GLB exported: " + Platform.display_label(path) +" • %d objects • " + Platform.display_location(path))
+	await _export_with_progress("glb", Platform.ensure_extension(path, "glb"))
 
 func _validate() -> void:
 	state.finish_paint_stroke(); state.commit_paint()
@@ -1644,6 +1619,14 @@ func _save_to(path: String) -> void:
 
 
 var _export_running := false
+var _export_channel
+var _active_export_thread: Thread
+var export_progress_layer: CanvasLayer
+var export_progress_bar: ProgressBar
+var export_progress_note: Label
+var export_progress_percent: Label
+var export_progress_activity: Label
+var _last_export_note := ""
 
 func _export_busy_message() -> void:
 	_status("An export is already running. Give it a moment.")
@@ -1663,61 +1646,177 @@ func _report_oversized() -> bool:
 		"\n\nRe-export the model with 2K instead of 4K textures, or split it into parts and place them together. Nothing was written.")
 	return true
 
+# The overlay is modal for editing, but it keeps drawing while background
+# tasks run. Percentages represent completed phases/work, not a time estimate.
+func _make_export_progress_overlay() -> void:
+	export_progress_layer = CanvasLayer.new()
+	export_progress_layer.layer = 80
+	add_child(export_progress_layer)
+	var shade := ColorRect.new()
+	shade.color = Color(0.02, 0.04, 0.04, 0.76)
+	shade.mouse_filter = Control.MOUSE_FILTER_STOP
+	export_progress_layer.add_child(shade)
+	shade.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	var center := CenterContainer.new()
+	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	shade.add_child(center)
+	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	var card := UI.panel(22, Color("141f20"))
+	card.custom_minimum_size = Vector2(460, 0)
+	card.mouse_filter = Control.MOUSE_FILTER_STOP
+	center.add_child(card)
+	var column := VBoxContainer.new()
+	column.add_theme_constant_override("separation", 10)
+	card.add_child(column)
+	var heading := HBoxContainer.new()
+	column.add_child(heading)
+	var title := UI.label("EXPORT IN PROGRESS", 18, TEXT)
+	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	heading.add_child(title)
+	export_progress_activity = UI.label("Working.", 14, ACCENT)
+	heading.add_child(export_progress_activity)
+	export_progress_note = UI.label("Preparing export", 14, TEXT)
+	export_progress_note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	column.add_child(export_progress_note)
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 12)
+	column.add_child(row)
+	export_progress_bar = ProgressBar.new()
+	export_progress_bar.min_value = 0
+	export_progress_bar.max_value = 100
+	export_progress_bar.show_percentage = false
+	export_progress_bar.custom_minimum_size = Vector2(0, 16)
+	export_progress_bar.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	export_progress_bar.add_theme_stylebox_override("background", UI.flat(Color("243537"), UI.LINE, 7, 1, 0, 0))
+	export_progress_bar.add_theme_stylebox_override("fill", UI.flat(Color("50c99b"), Color("50c99b"), 7, 0, 0, 0))
+	row.add_child(export_progress_bar)
+	export_progress_percent = UI.label("0%", 14, ACCENT)
+	export_progress_percent.custom_minimum_size.x = 42
+	export_progress_percent.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	row.add_child(export_progress_percent)
+	var hint := UI.label("Progress is by stage, not a time estimate. Keep Creator open.", 11, MUTED)
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	column.add_child(hint)
+	export_progress_layer.visible = false
+
 func _set_export_controls(enabled: bool) -> void:
 	_export_running = not enabled
-	for button in [export3d_button, exportglb_button]:
+	for button in [export3d_button, exportglb_button, export_button, export_here_button]:
 		if button != null: button.disabled = not enabled
+	if export_progress_layer != null: export_progress_layer.visible = not enabled
 
-func _export_progress(done: int, total: int, note: String = "") -> void:
-	if not note.is_empty():
+func _refresh_export_progress() -> void:
+	if _export_channel == null or export_progress_bar == null: return
+	var update: Dictionary = _export_channel.snapshot()
+	var amount := float(update.get("percent", 0.0))
+	var note := str(update.get("note", "Working"))
+	export_progress_bar.value = amount
+	export_progress_percent.text = "%d%%" % int(amount)
+	export_progress_note.text = note
+	# ASCII animation avoids missing circle glyphs on some Windows fonts.
+	var symbols := ["Working.", "Working..", "Working..."]
+	export_progress_activity.text = symbols[int(Time.get_ticks_msec() / 400) % symbols.size()]
+	if note != _last_export_note:
+		_last_export_note = note
 		_status(note)
-	else:
-		_status("Exporting: %d of %d objects placed..." % [done, total])
 
-func _export_mission_to(path: String) -> void:
+func _export_progress_tick(done: int, total: int, note: String = "") -> void:
+	if _export_channel != null:
+		var ratio := clampf(float(done) / float(maxi(1, total)), 0.0, 1.0)
+		var message := note if not note.is_empty() else "Placing objects · %d of %d" % [done, total]
+		_export_channel.report(23.0 + 21.0 * ratio, message)
+		_refresh_export_progress()
+	await get_tree().process_frame
+
+# Wait for one worker without blocking the main thread or touching UI from that
+# worker. No editor input/autosave can mutate the snapshot during an export.
+func _run_export_worker(work: Callable) -> Dictionary:
+	var thread := Thread.new()
+	var started := thread.start(work)
+	if started != OK:
+		return {"ok": false, "error": "Could not start an export worker (code %s)." % str(started)}
+	_active_export_thread = thread
+	while thread.is_alive():
+		_refresh_export_progress()
+		await get_tree().process_frame
+	var result = thread.wait_to_finish()
+	_active_export_thread = null
+	_refresh_export_progress()
+	if result is Dictionary: return result
+	return {"ok": false, "error": "An export worker ended without returning a result."}
+
+func _execute_export(kind: String, path: String) -> Dictionary:
+	# Copy containers before starting a worker. Packed byte arrays are treated as
+	# immutable; rendering nodes are created on the main thread and kept detached.
+	var snapshot = State.new()
+	snapshot.data = state.data.duplicate(true)
+	snapshot.custom_assets = state.custom_assets.duplicate(true)
+	var export_library = Library.new()
+	var baked: Dictionary = await _run_export_worker(Callable(ExportTasks, "bake").bind(snapshot, _export_channel))
+	if not bool(baked.get("ok", false)):
+		export_library.clear_templates()
+		return baked
+	_export_channel.report(23.0, "Building the terrain and scene")
+	_refresh_export_progress()
+	await get_tree().process_frame
+	var built: Dictionary = await Exporter.build_scene_stepped(snapshot, export_library, _export_progress_tick, baked.image)
+	if not bool(built.get("ok", false)):
+		export_library.clear_templates()
+		return built
+	var root: Node3D = built.root
+	var encoded: Dictionary = await _run_export_worker(Callable(ExportTasks, "encode_detached").bind(root, built.nodes, _export_channel))
+	# The worker has finished; only the main thread frees rendering nodes.
+	root.free()
+	export_library.clear_templates()
+	if not bool(encoded.get("ok", false)): return encoded
+	var combined := {
+		"bytes": encoded.bytes,
+		"nodes": encoded.get("nodes", built.nodes),
+		"objects": int(built.get("objects", 0)),
+		"ground_image": baked.image,
+		"worst_placement_m": float(encoded.get("worst_placement_m", 0.0)),
+	}
+	return await _run_export_worker(Callable(ExportTasks, "save").bind(kind, path, snapshot, combined, _export_channel))
+
+func _export_with_progress(kind: String, path: String) -> void:
 	if _export_running: _export_busy_message(); return
+	if path.is_empty(): _message("No export destination selected."); return
 	state.finish_paint_stroke(); state.commit_paint()
-	path = Platform.ensure_extension(path, "rmission")
 	if _report_oversized(): return
+	if kind == "mission" and str(state.data.get("recon_target", "")).is_empty():
+		_message("Select a placed object and use SET RECON TARGET before exporting a playable mission.")
+		return
+	_export_channel = ExportProgress.new()
+	_last_export_note = ""
 	_set_export_controls(false)
 	var started := Time.get_ticks_msec()
-	_status("Exporting the complete mission package: scene, ground, objects and models...")
+	_export_channel.report(1.0, "Preparing export")
+	_refresh_export_progress()
 	await get_tree().process_frame
-	var result: Dictionary = await _write_mission_package_async(path)
+	var result: Dictionary = await _execute_export(kind, path)
+	if bool(result.get("ok", false)):
+		_export_channel.report(100.0, "Export complete")
+		_refresh_export_progress()
+		await get_tree().process_frame
 	_set_export_controls(true)
-	var seconds := float(Time.get_ticks_msec() -started) / 1000.0
+	_export_channel = null
 	if not bool(result.get("ok", false)):
-		_message("Could not export mission: " + str(result.get("error", "")))
+		_message("Could not export: " + str(result.get("error", "unknown error")))
 		return
+	if kind != "mission":
+		_status(("3D pack exported: " if kind == "pack" else "Scene GLB exported: ") + Platform.display_label(path) + " • %d objects • " % int(result.get("objects", 0)) + Platform.display_location(path))
+		return
+	var seconds := float(Time.get_ticks_msec() - started) / 1000.0
 	var fidelity: Dictionary = result.get("fidelity", {})
-	_message("Mission package exported and verified: " + Platform.display_label(path) +"\n" + Platform.display_location(path) +"\n\n" +
-		"%d object%s, %d terrain height samples, ground surface %s.\nEmbedded scene: %.1f MB. File: %.1f MB. Took %.1f s.\n\nEvery object sits within %.4f m of where this editor shows it, and the file checks itself when it is opened.\n\nThe package holds the exact ground, colours, light, objects and models, so the scene can be reproduced from the file alone." % [
+	_message("Mission package exported and verified: " + Platform.display_label(path) + "\n" + Platform.display_location(path) + "\n\n" +
+		"%d object%s, %d terrain height samples, ground surface %s.\nEmbedded scene: %.1f MiB. File: %.1f MiB. Took %.1f s.\n\nEvery object sits within %.4f m of where this editor shows it, and the file checks itself when it is opened.\n\nThe package holds the exact ground, colours, light, objects and models, so the scene can be reproduced from the file alone." % [
 			int(result.get("objects", 0)), "" if int(result.get("objects", 0)) == 1 else "s", int(fidelity.get("terrain_cells", 0)),
 			"included" if not str(state.data.get("terrain_texture", "")).is_empty() or bool(fidelity.get("has_paint", false)) or bool(fidelity.get("has_snow", false)) or bool(fidelity.get("has_environment", false)) else "default",
 			float(result.get("scene_bytes", 0)) / 1048576.0, float(result.get("bytes", 0)) / 1048576.0, seconds,
 			float(fidelity.get("worst_placement_m", 0.0))])
 
-
-func _write_mission_package_async(path: String) -> Dictionary:
-	var built: Dictionary = await Exporter.build_combined_stepped(state, library, _export_progress_tick)
-	if not bool(built.get("ok", false)): _message(_explain(built)); return { "ok": false, "error": str(built.get("error", "the scene could not be built"))}
-	var fidelity_block := {
-		"ok": true,
-		"objects": int(built.get("objects", 0)),
-		"worst_placement_m": float(built.get("worst_placement_m", 0.0)),
-		"glb_bytes": (built.get("bytes", PackedByteArray()) as PackedByteArray).size(),
-		"checked_utc": Time.get_datetime_string_from_system(true),
-	}
-	var block := Exporter.scene_block(state, fidelity_block)
-	_status("Writing and checking the mission file...")
-	await get_tree().process_frame
-	var result: Dictionary = Store.save_mission_package(path, state.data, state.custom_assets, built.bytes, block)
-	return result
-
-
-func _export_progress_tick(done: int, total: int, note: String = "") -> void:
-	_export_progress(done, total, note)
-	await get_tree().process_frame
+func _export_mission_to(path: String) -> void:
+	await _export_with_progress("mission", Platform.ensure_extension(path, "rmission"))
 
 
 func _write_mission_package(path: String) -> Dictionary:
@@ -1752,10 +1851,18 @@ func _run_pending() -> void:
 	elif action == "open": open_dialog.popup_centered_ratio(0.7)
 	elif action == "quit": get_tree().quit()
 func _exit_tree() -> void:
-	library.clear_templates()
+	# Normal close/back is blocked during export. If the tree is forcibly freed,
+	# join a started worker before releasing its data or rendering resources.
+	if _active_export_thread != null and _active_export_thread.is_started():
+		_active_export_thread.wait_to_finish()
+	if library != null: library.clear_templates()
 func _notification(what: int) -> void:
-	if what == NOTIFICATION_WM_CLOSE_REQUEST: _request_action("quit")
-	elif what == NOTIFICATION_WM_GO_BACK_REQUEST: _android_back()
+	if what == NOTIFICATION_WM_CLOSE_REQUEST or what == NOTIFICATION_WM_GO_BACK_REQUEST:
+		if _export_running:
+			_status("Export in progress; keep Creator open until it finishes.")
+			return
+		if what == NOTIFICATION_WM_CLOSE_REQUEST: _request_action("quit")
+		else: _android_back()
 
 func _android_back() -> void:
 
@@ -1945,7 +2052,15 @@ func _current_ids() -> Array:
 
 
 
+# Intercept input before focused fields/buttons receive it. The export snapshot
+# must not be changed by keyboard, touch or mouse events beneath the overlay.
+func _input(_event: InputEvent) -> void:
+	if _export_running: get_viewport().set_input_as_handled()
+
 func _unhandled_key_input(event: InputEvent) -> void:
+	if _export_running:
+		get_viewport().set_input_as_handled()
+		return
 	var key := event as InputEventKey
 	if key == null or not key.pressed or key.echo: return
 	var focused := get_viewport().gui_get_focus_owner()
@@ -2095,7 +2210,7 @@ func _clear_underlay() -> void:
 
 
 func _autosave_tick() -> void:
-	if autosave == null or state == null: return
+	if _export_running or autosave == null or state == null: return
 	var now := Time.get_ticks_msec()
 	if not autosave.should_write(now, state.data.get("objects", []).size() > 0 or state.dirty): return
 	var result = autosave.write(state, now)

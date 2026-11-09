@@ -31,7 +31,9 @@ static func scene_nodes(state) -> Array:
 	var terrain: Dictionary = state.data.get("terrain", {})
 	var objects: Array = state.data.get("objects", [])
 	var rows: Array = []
-	var used_names := {}
+	# The terrain already occupies a direct child named Terrain. Reserve it,
+	# and reserve the generated suffixes too ("A", "A", "A 2" must all differ).
+	var used_names := {"Terrain": true}
 	for row in objects:
 		if not row is Dictionary: continue
 		var asset := str(row.get("asset", ""))
@@ -48,12 +50,13 @@ static func scene_nodes(state) -> Array:
 		if asset == "brick_block": object_scale *= clampf(float(row.get("brick_scale", 1.0)), 0.4, 3.0)
 		var basis := Basis.from_euler(Vector3(deg_to_rad(pitch), deg_to_rad(yaw), deg_to_rad(roll)), EULER_ORDER_YXZ)
 		var quat := basis.get_rotation_quaternion()
-		var name_ := safe_name(str(row.get("name", asset)), str(row.get("id", "")))
-		if used_names.has(name_):
-			used_names[name_] = int(used_names[name_]) +1
-			name_ = "%s %d" % [name_, int(used_names[name_])]
-		else:
-			used_names[name_] = 1
+		var base_name := safe_name(str(row.get("name", asset)), str(row.get("id", "")))
+		var name_ := base_name
+		var suffix := 2
+		while used_names.has(name_):
+			name_ = "%s %d" % [base_name, suffix]
+			suffix += 1
+		used_names[name_] = true
 		rows.append({
 			"id": str(row.get("id", "")),
 			"name": name_,
@@ -90,7 +93,7 @@ static func build_scene(state, library, texture_for: Callable = Callable()) -> D
 		"ground_image": shell.baked, "bounds": world_bounds(root)}
 
 
-static func _scene_shell(state, texture_for: Callable = Callable()) -> Dictionary:
+static func _scene_shell(state, texture_for: Callable = Callable(), pre_baked: Image = null) -> Dictionary:
 	var terrain: Dictionary = state.data.get("terrain", {})
 	var objects: Array = state.data.get("objects", [])
 	if terrain.is_empty(): return { "ok": false, "error": "There is no terrain to export."}
@@ -104,7 +107,9 @@ static func _scene_shell(state, texture_for: Callable = Callable()) -> Dictionar
 	ground_material.cull_mode = BaseMaterial3D.CULL_DISABLED
 	ground_material.roughness = 0.9
 	ground_material.metallic = 0.0
-	var baked: Image = GroundBake.bake(state, texture_for if texture_for.is_valid() else _fallback_texture(state))
+	var baked: Image = pre_baked
+	if baked == null:
+		baked = GroundBake.bake(state, texture_for if texture_for.is_valid() else _fallback_texture(state))
 	if baked != null:
 		ground_material.albedo_texture = ImageTexture.create_from_image(baked)
 		ground_material.albedo_color = Color.WHITE
@@ -116,8 +121,8 @@ static func _scene_shell(state, texture_for: Callable = Callable()) -> Dictionar
 
 
 
-static func build_scene_stepped(state, library, tick: Callable) -> Dictionary:
-	var shell := _scene_shell(state)
+static func build_scene_stepped(state, library, tick: Callable, pre_baked: Image = null) -> Dictionary:
+	var shell := _scene_shell(state, Callable(), pre_baked)
 	if not bool(shell.get("ok", false)): return shell
 	var root: Node3D = shell.root
 	var objects: Array = state.data.get("objects", [])
@@ -132,7 +137,9 @@ static func build_scene_stepped(state, library, tick: Callable) -> Dictionary:
 		if row is Dictionary:
 			var id := str(row.get("id", ""))
 			if by_id.has(id):
-				var one := _place_objects(root, [by_id[id]], [row], terrain, library, state.custom_assets)
+				# Construction follows the combined terrain, including every terrain
+				# feature, even though this frame places only one object.
+				var one := _place_objects(root, [by_id[id]], [row], terrain, library, state.custom_assets, objects)
 				if not bool(one.get("ok", false)):
 					root.free()
 					return one
@@ -143,15 +150,16 @@ static func build_scene_stepped(state, library, tick: Callable) -> Dictionary:
 
 
 
-static func _place_objects(root: Node3D, node_rows: Array, objects: Array, terrain: Dictionary, library, assets: Dictionary) -> Dictionary:
+static func _place_objects(root: Node3D, node_rows: Array, objects: Array, terrain: Dictionary, library, assets: Dictionary, terrain_objects: Array = []) -> Dictionary:
 	var by_id := {}
 	for row in node_rows: by_id[str(row.id)] = row
+	var context := terrain_objects if not terrain_objects.is_empty() else objects
 	var placed := 0
 	for row in objects:
 		if not row is Dictionary: continue
 		var id := str(row.get("id", ""))
 		if not by_id.has(id): continue
-		var node := _object_node(row, by_id[id], terrain, objects, library, assets, true)
+		var node := _object_node(row, by_id[id], terrain, context, library, assets, true)
 		if node == null:
 			var why := ""
 			if library != null: why = str(library.last_error)
@@ -172,6 +180,22 @@ static func texture_lookup(assets: Dictionary) -> Callable:
 		if image == null: return null
 		if image.get_format() != Image.FORMAT_RGB8:
 			image = image.duplicate(); image.convert(Image.FORMAT_RGB8)
+		return image
+
+# Worker-safe texture lookup: decode a private CPU Image, without creating or
+# reading an ImageTexture on the rendering server from the bake thread.
+static func cpu_texture_lookup(assets: Dictionary) -> Callable:
+	return func (id: String) -> Image:
+		if not assets.has(id): return null
+		var record: Dictionary = assets[id]
+		if str(record.get("category", "model")) != "texture": return null
+		var bytes: PackedByteArray = record.get("bytes", PackedByteArray())
+		var valid := TextureCodec.validate(bytes)
+		if not valid.ok: return null
+		var image := Image.new()
+		var error := image.load_png_from_buffer(bytes) if str(valid.format) == "png" else image.load_jpg_from_buffer(bytes)
+		if error != OK or image.is_empty(): return null
+		if image.get_format() != Image.FORMAT_RGB8: image.convert(Image.FORMAT_RGB8)
 		return image
 
 static func _fallback_texture(state) -> Callable:
@@ -337,9 +361,10 @@ static func verify_glb(bytes: PackedByteArray, expected: Array) -> Dictionary:
 
 
 
-static func manifest_rows(state) -> Array:
+static func manifest_rows(state, serialized_nodes: Variant = null) -> Array:
 	var rows: Array = []; var index := 1
-	for row: Dictionary in scene_nodes(state):
+	var source: Array = serialized_nodes if serialized_nodes is Array else scene_nodes(state)
+	for row: Dictionary in source:
 		rows.append({
 			"index": index, "id": str(row.id), "name": str(row.name), "asset": str(row.asset),
 			"x_m": round(float(row.position[0]) * 1000.0) / 1000.0,
@@ -355,10 +380,10 @@ static func manifest_rows(state) -> Array:
 		index += 1
 	return rows
 
-static func manifest_csv(state) -> String:
+static func manifest_csv(state, serialized_nodes: Variant = null) -> String:
 	var cols := ["index", "id", "name", "asset", "x_m", "y_m", "z_m", "yaw_deg", "pitch_deg", "roll_deg", "scale", "faction", "route_points", "hidden", "animation_clip"]
 	var lines: Array = [",".join(cols)]
-	for row: Dictionary in manifest_rows(state):
+	for row: Dictionary in manifest_rows(state, serialized_nodes):
 		var cells: Array = []
 		for c in cols:
 			var value = str(row[c])
@@ -419,8 +444,9 @@ static func _mask_sha(image: Image) -> String:
 	if image == null: return ""
 	return Codec.sha256(image.save_png_to_buffer())
 
-static func manifest_json(state, fidelity: Dictionary = {}) -> String:
+static func manifest_json(state, fidelity: Dictionary = {}, serialized_nodes: Variant = null) -> String:
 	var block: Dictionary = scene_block(state, fidelity)
+	if serialized_nodes is Array: block["nodes"] = serialized_nodes
 	var text := JSON.stringify(block, "  ", false)
 	var heights: Array = block.get("terrain", {}).get("heights", [])
 	if heights.size() > 0:
@@ -715,8 +741,8 @@ static func _pack_from_combined(state, combined: Dictionary) -> Dictionary:
 	if writer.open(temp) != OK: return { "ok": false, "error": "Could not start the export archive."}
 	var entries := {
 		"REAPER_3D_Export/scene.glb": combined.bytes,
-		"REAPER_3D_Export/manifest.csv": manifest_csv(state).to_utf8_buffer(),
-		"REAPER_3D_Export/manifest.json": manifest_json(state, fidelity).to_utf8_buffer(),
+		"REAPER_3D_Export/manifest.csv": manifest_csv(state, combined.get("nodes", null)).to_utf8_buffer(),
+		"REAPER_3D_Export/manifest.json": manifest_json(state, fidelity, combined.get("nodes", null)).to_utf8_buffer(),
 		"REAPER_3D_Export/README.txt": readme_text(state, fidelity).to_utf8_buffer(),
 		"REAPER_3D_Export/project.godot": godot_project_godot(state).to_utf8_buffer(),
 		"REAPER_3D_Export/main.tscn": godot_main_tscn(state).to_utf8_buffer(),

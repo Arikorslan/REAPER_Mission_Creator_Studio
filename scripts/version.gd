@@ -1,8 +1,8 @@
 extends RefCounted
 
 
-const VERSION := "2.0.1"
-const BUILD := "2026-11-07"
+const VERSION := "2.0.3"
+const BUILD := "2026-11-06"
 const NAME := "REAPER MISSION CREATOR"
 const EDITION := "Studio Interface"
 
@@ -21,8 +21,9 @@ static func splash_subtitle() -> String:
 
 static func highlights() -> Array:
 	return [
-		"Big models export again: a single model may now be 96 MB, not 40 MB",
-		"Export runs in steps and shows progress, so the window no longer freezes",
+		"Import models and animations up to 150 MiB each; mission scenes may be up to 512 MiB",
+		"Large mission packages are written in segments to reduce memory use", 
+		"Export shows live, stage-based progress while major work runs in the background",
 		"An over-size model is named before the export starts; a model that will not load stops it instead of becoming a placeholder",
 		"Time of day, fog, snow cover and weather: clear, golden hour, night, overcast, snow, rain, dust storm",
 		"Paint snow straight onto the ground, with a live snow-cover blend",

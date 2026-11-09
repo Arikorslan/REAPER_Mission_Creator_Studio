@@ -50,8 +50,11 @@ static func has_surface(settings_map: Dictionary) -> bool:
 
 
 
-static func bake(state, texture_for: Callable, size: int = BAKE_SIZE) -> Image:
+# The optional callback reports real completed rows. Image work is CPU-only;
+# the export worker never creates a GPU texture or touches the active tree.
+static func bake(state, texture_for: Callable, size: int = BAKE_SIZE, progress: Callable = Callable()) -> Image:
 	var map := settings(state)
+	if progress.is_valid(): progress.call(0, size)
 	var out := Image.create(size, size, false, Image.FORMAT_RGB8)
 	var base: Image = _rgb(map.get("base_id", ""), texture_for)
 	var base_colour := Color.WHITE if base != null else DEFAULT_BASE_COLOUR
@@ -71,8 +74,8 @@ static func bake(state, texture_for: Callable, size: int = BAKE_SIZE) -> Image:
 	var snow_colour: Color = map.snow_colour
 	var wet := float(map.wet)
 	if base == null and layer_images.is_empty() and snow == null and snow_cover <= 0.001:
-
 		out.fill(base_colour)
+		if progress.is_valid(): progress.call(size, size)
 		return out
 	var flat := _flatness(state)
 	var base_bytes := base.get_data() if base != null else PackedByteArray()
@@ -91,6 +94,7 @@ static func bake(state, texture_for: Callable, size: int = BAKE_SIZE) -> Image:
 	var out_bytes := out.get_data()
 	var stride := size * 3
 	for py in size:
+		if progress.is_valid() and py % 16 == 0: progress.call(py, size)
 		var v: float = float(py) / float(maxi(1, size - 1))
 		var row := py * stride
 		for px in size:
@@ -125,6 +129,7 @@ static func bake(state, texture_for: Callable, size: int = BAKE_SIZE) -> Image:
 			out_bytes[o + 1] = clampi(int(g * 255.0), 0, 255)
 			out_bytes[o + 2] = clampi(int(b * 255.0), 0, 255)
 	out.set_data(size, size, false, Image.FORMAT_RGB8, out_bytes)
+	if progress.is_valid(): progress.call(size, size)
 	return out
 
 static func _rgb(id: Variant, texture_for: Callable) -> Image:

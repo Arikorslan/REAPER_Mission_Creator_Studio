@@ -2,9 +2,10 @@ extends RefCounted
 
 
 const Codec = preload("res://scripts/glb_codec.gd")
-const MAX_FBX_BYTES := 20 * 1024 * 1024
+# Input FBX and its converted GLB are each bounded by the same import budget.
+const MAX_FBX_BYTES := Codec.MAX_GLB_BYTES
 static func convert(bytes: PackedByteArray, animation_only := false, require_animation := false) -> Dictionary:
-	if bytes.size() < 32 or bytes.size() > MAX_FBX_BYTES: return { "ok": false, "error": "FBX must be between 32 bytes and 20 MiB."}
+	if bytes.size() < 32 or bytes.size() > MAX_FBX_BYTES: return { "ok": false, "error": "FBX must be between 32 bytes and %d MiB." % int(MAX_FBX_BYTES / 1048576)}
 	if not ClassDB.class_exists("FBXDocument"): return { "ok": false, "error": "This build does not contain the FBX importer."}
 	var fbx := FBXDocument.new(); var fs := FBXState.new(); var err := fbx.append_from_buffer(bytes, "", fs)
 	if err != OK: return { "ok": false, "error": "Could not read the FBX (error %s)." % err}
